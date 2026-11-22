@@ -1,0 +1,25 @@
+[Unit]
+Description=Daily local Stepik practice bot
+After=network-online.target raspberry-llm-gateway.service
+Wants=network-online.target raspberry-llm-gateway.service
+ConditionPathExists=@HOME_DIR@/.config/stepik-daily-bot/stepik.env
+StartLimitIntervalSec=1h
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@PROJECT_DIR@
+ExecStart="@PROJECT_DIR@/.venv/bin/python" "@PROJECT_DIR@/bot.py" --submit --require-trial
+TimeoutStartSec=12h
+Restart=on-failure
+RestartSec=15min
+SuccessExitStatus=2
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

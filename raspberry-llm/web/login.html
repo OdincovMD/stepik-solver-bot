@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Вход · Hardbox</title>
+  <style>
+    :root { color-scheme: dark; --page:#101918; --surface:#172421; --text:#f0f4ec; --muted:#aabbb0; --accent:#b6db8c; --border:#394b42; --danger:#ffb4a8; --thumb:#667e6d; --track:#172421; font-family:"Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:var(--page); scrollbar-color:var(--thumb) var(--track); }
+    * { box-sizing:border-box; scrollbar-color:var(--thumb) var(--track); scrollbar-width:auto; }
+    *::-webkit-scrollbar { width:12px; height:12px; } *::-webkit-scrollbar-track { background:var(--track); } *::-webkit-scrollbar-thumb { background:var(--thumb); border:3px solid var(--track); border-radius:8px; }
+    body { margin:0; min-height:100svh; display:grid; grid-template-columns:minmax(0,1fr) minmax(22rem,30rem); gap:4rem; align-items:center; max-width:78rem; padding:clamp(1.5rem,6vw,6rem); margin-inline:auto; }
+    .wordmark { font:600 .9rem "Courier New",monospace; letter-spacing:.16em; color:var(--accent); }
+    h1 { font-family:Georgia,"Times New Roman",serif; font-size:clamp(2.8rem,6vw,5rem); font-weight:400; line-height:1.06; letter-spacing:-.035em; margin:2.5rem 0 1.5rem; }
+    .intro { color:var(--muted); font-size:1.05rem; line-height:1.7; max-width:27rem; }
+    .panel { padding:clamp(1.5rem,4vw,2.5rem); background:var(--surface); border:1px solid var(--border); border-radius:1rem; }
+    h2 { font-size:1.5rem; margin:0 0 .65rem; } .note { color:var(--muted); line-height:1.55; margin:0 0 1.75rem; }
+    label { display:block; font-size:.9rem; margin:1.25rem 0 .5rem; }
+    input { width:100%; min-height:3.1rem; border:1px solid var(--border); border-radius:.5rem; background:var(--page); color:var(--text); padding:.75rem; font:inherit; }
+    .password { display:flex; gap:.5rem; align-items:center; } .password input { min-width:0; }
+    button { font:inherit; cursor:pointer; min-height:3.1rem; border-radius:.5rem; border:1px solid transparent; transition:background .12s; }
+    .reveal { font-size:.85rem; padding-inline:.8rem; background:transparent; border-color:var(--border); color:var(--muted); } .reveal:hover { background:var(--border); color:var(--text); }
+    .submit { width:100%; margin-top:.5rem; background:var(--accent); color:var(--page); font-weight:600; } .submit:hover { background:#c7eba2; } button:active { filter:brightness(.9); }
+    button:disabled { cursor:wait; opacity:.7; } :focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+    #feedback { min-height:3.5rem; padding-top:.75rem; margin:0; font-size:.9rem; line-height:1.45; color:var(--danger); }
+    .footer { color:var(--muted); font-size:.85rem; margin-top:1.5rem; line-height:1.55; }
+    #account a { display:block; color:var(--accent); margin:1rem 0; min-height:2.75rem; padding-top:.7rem; border-radius:.5rem; } #account a:hover { color:var(--text); } #account a:active { color:var(--muted); }
+    @media(max-width:760px) { body { display:block; padding:2rem max(1.25rem,env(safe-area-inset-right)) max(2rem,env(safe-area-inset-bottom)); max-width:32rem; } h1 { font-size:2.8rem; margin:1.75rem 0 1rem; } .intro { margin-bottom:2rem; } .panel { padding:1.5rem; } }
+    @media(prefers-reduced-motion:reduce) { * { transition:none!important; } }
+    @media(forced-colors:active) { * { scrollbar-color:auto; } button,input,.panel { border:1px solid CanvasText; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wordmark">HARDBOX / ЛИЧНЫЙ ЧАТ</div>
+    <h1>Место для<br>ваших мыслей.</h1>
+    <p class="intro">Задавайте вопросы, разбирайте идеи и работайте с текстом в своём личном чате.</p>
+  </header>
+  <main class="panel">
+    <h2>Добро пожаловать</h2>
+    <p class="note">Войдите, чтобы продолжить разговор.</p>
+    <div id="account" hidden><a href="__PREFIX__/">Открыть чат</a><button type="button" class="reveal" onclick="signOut()">Выйти</button></div>
+    <form id="login" novalidate>
+      <label for="username">Имя пользователя</label>
+      <input id="username" name="username" autocomplete="username" required value="owner" aria-describedby="feedback">
+      <label for="password">Пароль</label>
+      <div class="password">
+        <input id="password" name="password" type="password" autocomplete="current-password" required aria-describedby="feedback">
+        <button class="reveal" type="button" id="reveal" aria-controls="password" aria-pressed="false" onclick="togglePassword()">Показать</button>
+      </div>
+      <p id="feedback" role="status" aria-live="polite"></p>
+      <button type="submit" class="submit" id="submit">Войти в чат</button>
+    </form>
+    <p class="footer">Вход действует 12 часов. Пароль можно сохранить в менеджере паролей вашего устройства.</p>
+  </main>
+  <script>
+    const prefix='__PREFIX__', form=document.querySelector('#login'), submit=document.querySelector('#submit'), feedback=document.querySelector('#feedback'), password=document.querySelector('#password'), username=document.querySelector('#username'), reveal=document.querySelector('#reveal');
+    function togglePassword(){ const visible=password.type==='password'; password.type=visible?'text':'password'; reveal.textContent=visible?'Скрыть':'Показать'; reveal.setAttribute('aria-pressed',String(visible)); }
+    fetch(prefix+'/session',{credentials:'same-origin'}).then(response=>{if(response.ok){document.querySelector('#account').hidden=false; form.hidden=true; document.querySelector('.note').textContent='Вы уже вошли в свой личный чат.';}}).catch(()=>{});
+    async function signOut(){ const button=document.querySelector('#account button'); button.disabled=true; try{const response=await fetch(prefix+'/logout',{method:'POST',credentials:'same-origin'}); if(response.ok)location.reload(); else throw new Error('logout');}catch(error){document.querySelector('.note').textContent='Не удалось выйти. Проверьте подключение и повторите.';button.disabled=false;} }
+    let pending=false;
+    form.addEventListener('submit',async event=>{
+      event.preventDefault(); if(pending)return;
+      username.removeAttribute('aria-invalid'); password.removeAttribute('aria-invalid');
+      if(!username.value.trim()||!password.value){ feedback.textContent='Введите имя пользователя и пароль.'; const field=!username.value.trim()?username:password; field.setAttribute('aria-invalid','true'); field.focus(); return; }
+      pending=true; submit.disabled=true; submit.textContent='Входим…'; feedback.textContent='';
+      const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),20000);
+      try {
+        const response=await fetch(prefix+'/login',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(new FormData(form)),signal:controller.signal,credentials:'same-origin'});
+        if(response.ok){ password.value=''; location.replace(prefix+'/'); return; }
+        password.value=''; password.setAttribute('aria-invalid','true'); password.focus();
+        feedback.textContent=response.status===429?'Слишком много попыток. Подождите десять минут.':'Не удалось войти. Проверьте имя пользователя и пароль.';
+      }catch(error){ feedback.textContent='Нет связи с сервером. Проверьте подключение и попробуйте ещё раз.'; }
+      finally { clearTimeout(timer); pending=false; submit.disabled=false; submit.textContent='Войти в чат'; }
+    });
+  </script>
+</body>
+</html>

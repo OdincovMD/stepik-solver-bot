@@ -1,0 +1,10 @@
+[Unit]
+Description=Start Stepik bot daily at 05:00 UTC (08:00 Moscow)
+
+[Timer]
+OnCalendar=*-*-* 05:00:00 UTC
+Persistent=true
+Unit=stepik-daily-bot.service
+
+[Install]
+WantedBy=timers.target

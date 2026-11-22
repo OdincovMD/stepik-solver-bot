@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+!.env.example
+access.json
+credentials.json
+*.key
+*.pem
+*.env
+*.gguf
+results/
+reports/
+source.zip

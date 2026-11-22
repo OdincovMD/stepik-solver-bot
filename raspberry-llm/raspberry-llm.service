@@ -1,0 +1,31 @@
+[Unit]
+Description=Local Qwen3 API (llama.cpp CPU)
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/projects/raspberry-llm
+EnvironmentFile=-/home/admin/.config/raspberry-llm/model.env
+ExecStart=/bin/sh /home/admin/projects/raspberry-llm/start.sh
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+Nice=10
+CPUQuota=250%
+# This host has no cgroup memory controller. RLIMIT_AS limits virtual address
+# space, including mmap; it is not a limit on resident RAM usage.
+LimitAS=6G
+TasksMax=32
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictSUIDSGID=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

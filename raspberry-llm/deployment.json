@@ -1,0 +1,89 @@
+{
+  "audited_at": "2026-11-22",
+  "ssh_host": "raspberry",
+  "host_model": "Raspberry Pi 5 Model B Rev 1.0",
+  "cpu": "4 x Cortex-A76, 2.4 GHz, aarch64",
+  "ram_gib": 7.9,
+  "os": "Debian GNU/Linux 13 (trixie)",
+  "cgroup_memory_controller": false,
+  "runtime": {
+    "project": "ggml-org/llama.cpp",
+    "tag": "b12359",
+    "build_report": "1.0.0-dev, build 12359, commit b1b770d90",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-ubuntu-arm64.tar.gz",
+    "sha256": "dc7aa17a67884619b7223870aca9fd6addbc01717713b04a714add1c31137359"
+  },
+  "models": [
+    {
+      "role": "primary",
+      "file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "repository": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+      "revision": "a06e946bb6b655725eafa393f4a9745d460374c9",
+      "bytes": 2497281120,
+      "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"
+    },
+    {
+      "role": "experimental",
+      "file": "Qwen3-1.7B-Q4_K_M.gguf",
+      "repository": "unsloth/Qwen3-1.7B-GGUF",
+      "revision": "d7f544eead698dbd1f15126ef60b45a1e1933222",
+      "bytes": 1107409472,
+      "sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897"
+    },
+    {
+      "role": "fast_alternative",
+      "file": "Qwen3-0.6B-Q4_K_M.gguf",
+      "repository": "unsloth/Qwen3-0.6B-GGUF",
+      "revision": "50968a4468ef4233ed78cd7c3de230dd1d61a56b",
+      "bytes": 396705472,
+      "sha256": "ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a"
+    }
+  ],
+  "benchmark_conditions": {
+    "all": "3 threads, CPUQuota 250%, context 2048, one slot, temperature 0.2, seed 42, max_tokens 96, cache_prompt false",
+    "qwen3-1.7b": "skin stack running; repack enabled; --reasoning-budget 0; enable_thinking false",
+    "qwen3-0.6b": "skin stack running; repack enabled; --reasoning-budget 0; enable_thinking false",
+    "qwen3-4b-lowmem": "skin stack stopped; repack disabled; --reasoning off; --reasoning-budget 0",
+    "qwen3-4b": "skin stack stopped; repack enabled; --reasoning off; --reasoning-budget 0",
+    "limitation": "Different host load and repack settings; three smoke cases, not a quality ranking or controlled benchmark."
+  },
+  "final_validation": {
+    "service": "raspberry-llm.service",
+    "enabled": true,
+    "listen": "127.0.0.1:11434",
+    "model_alias": "raspberry-llm",
+    "context_tokens": 2048,
+    "rss_kib": 5214880,
+    "swap_used_mib": 255,
+    "temperature_c": 58.2,
+    "throttled": "0x0",
+    "streaming_input_tokens": 1245,
+    "streaming_ttft_seconds": 108.08845351496711,
+    "streaming_wall_seconds": 109.83617296500597,
+    "streaming_answer_correct": true
+  },
+  "decommissioned": {
+    "compose_project": "skin",
+    "containers_stopped": 9,
+    "container_restart_policy": "no",
+    "systemd_unit": "skin-cancer.service",
+    "systemd_enabled": false,
+    "data_removed": false
+  },
+  "remote_access": {
+    "chat_url": "https://skin-cancer-ai.ru/llm/",
+    "api_base": "https://skin-cancer-ai.ru/v1",
+    "gateway_port": 18085,
+    "gateway_loopback_only": true,
+    "tunnel_unit": "tuna-http-100.service",
+    "tunnel_reused": true,
+    "new_dns_records": false,
+    "new_tunnel": false,
+    "web_auth": "password + secure cookie",
+    "api_auth": "named Bearer keys",
+    "source_of_credentials": "outside Git: ~/.config/raspberry-llm",
+    "model_parameters_changed": false,
+    "host_reboot_performed": false,
+    "service_restart_verified": true
+  }
+}
