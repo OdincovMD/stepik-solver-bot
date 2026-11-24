@@ -86,6 +86,9 @@ class StepikTransport:
             return Response({"stepics": [{"id": 1}], "users": [{"id": 42}]})
         if path.startswith("submissions/"):
             return Response({"submissions": [self.sent[int(path.split("/")[1]) - 1]]})
+        if path.startswith("attempts/"):
+            aid = int(path.split("/")[1])
+            return Response({"attempts": [{"id": aid, "user": 42, "step": aid // 10}]})
         if path.startswith("progresses/"):
             sid = int(path.split("_s")[1])
             return Response({"progresses": [{"id": path.split("/")[1], "is_passed": sid * 10 in self.sent}]})
@@ -140,6 +143,24 @@ def offline_solver(transport, folder):
 
 
 class WireTests(unittest.TestCase):
+    def test_correct_verdict_with_wrong_attempt_owner_is_not_counted_or_compensated(self):
+        class ChangedOwner(StepikTransport):
+            def request(self, method, url, **kwargs):
+                response = super().request(method, url, **kwargs)
+                if "/api/attempts/" in url:
+                    response.data["attempts"][0]["user"] = 99
+                return response
+        remote, local = ChangedOwner(), ChatTransport()
+        with tempfile.TemporaryDirectory() as folder, patch("bot.utcnow", return_value=NOW), patch("sys.stdout", new_callable=io.StringIO):
+            path = Path(folder) / "progress.json"
+            result = run(Stepik("id", "secret", session=remote), offline_solver(local, folder), path,
+                         target=2, dry_run=False, expected_user=42, canary=True, check_model=True)
+            self.assertEqual(result, 0)
+            self.assertEqual(len(remote.sent), 1)
+            self.assertEqual(load_state(path)["solved"], {})
+            report = json.loads((path.parent / "reports/latest.json").read_text())
+            self.assertEqual(report["stop_reason"], "unresolved_submission")
+
     def test_all_supported_wire_formats_and_idempotent_restart(self):
         remote, local = StepikTransport(), ChatTransport()
         api = Stepik("offline-id", "OFFLINE-CLIENT-SECRET", session=remote)

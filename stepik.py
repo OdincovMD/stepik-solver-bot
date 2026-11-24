@@ -41,6 +41,7 @@ class Stepik:
         self.read_progress = None
         self.inventory_correct_steps = None
         self.inventory_uncertain_steps = set()
+        self.read_only = False
 
     def prepare_inventory(self):
         """Build a read-only index of the complete own correct history.
@@ -109,6 +110,8 @@ class Stepik:
             raise APIError("oauth") from None
 
     def request(self, method, path, **kwargs):
+        if self.read_only and method != "GET":
+            raise ValueError("read_only_stepik_client_cannot_write")
         refreshed = False
         for retry in range(4):
             self.auth()
@@ -236,7 +239,18 @@ class Stepik:
                 self.notice(str(exc), course=cid)
 
     def step(self, step_id):
-        return one(self.get(f"steps/{step_id}"), "steps")
+        step = one(self.get(f"steps/{step_id}"), "steps")
+        if step.get("id") != step_id:
+            raise APIError("step_identity")
+        return step
+
+    def verify_submission_owner(self, attempt_id, step_id):
+        expected = self.user_id
+        if expected is None or self.identity() != expected:
+            raise APIError("oauth_identity_changed")
+        attempt = one(self.get(f"attempts/{attempt_id}"), "attempts")
+        if attempt.get("id") != attempt_id or attempt.get("user") != expected or attempt.get("step") != step_id:
+            raise APIError("accepted_attempt_owner_mismatch")
 
     def correct_history(self, step_id):
         if self.user_id is None:

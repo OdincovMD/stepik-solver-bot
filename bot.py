@@ -62,6 +62,9 @@ def confirm(api, state, sid, job):
             raise APIError("unknown_verdict")
         job.update(phase="done", reason="partial_score" if result.get("status") == "correct" else result["status"])
         return
+    if hasattr(api, "verify_submission_owner"):
+        api.verify_submission_owner(job["attempt_id"], int(sid))
+        job["account_reverified"] = True
     if is_solved(api.step(int(sid)), api) is not True:
         raise APIError("correct_awaiting_progress")
     try:
@@ -128,6 +131,11 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
         max_candidates=104, max_steps=10000, max_runtime=39600, guard_seconds=1200,
         expected_user=None, canary=False, require_canary=False, model_digest=None, recover_only=False, check_model=False,
         trial=False, require_trial=False):
+    if dry_run and isinstance(api, Stepik):
+        from audit import run_inventory
+        report = run_inventory(api, state_path, expected_user=expected_user if expected_user is not None else api.identity(),
+                               target=target, max_steps=max_steps, max_candidates=max_candidates, max_runtime=max_runtime)
+        return report["accepted"]
     state_path = Path(state_path)
     report = {"started_at": utcnow().isoformat(), "utc_day": utcnow().date().isoformat(),
               "mode": "dry_run" if dry_run else ("reconcile" if recover_only else ("canary" if canary else ("trial" if trial else "submit"))),
@@ -148,7 +156,7 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                 raise RuntimeError("state_belongs_to_another_account")
             account_checked = True
             if not dry_run:
-                if getattr(api, "inventory_correct_steps", None) is not None:
+                if getattr(api, "inventory_correct_steps", None) is not None or getattr(api, "read_only", False):
                     raise RuntimeError("fresh_stepik_client_required_for_submission")
                 if expected_user is None:
                     raise RuntimeError("expected_user_required_for_submission")
@@ -378,6 +386,7 @@ def main():
     parser.add_argument("--max-candidates", type=int, default=104)
     parser.add_argument("--max-steps", type=int, default=10000)
     parser.add_argument("--max-runtime", type=int, default=39600)
+    parser.add_argument("--restart-audit", action="store_true", help="Discard read-only cursors for this account, keeping verified old correct exclusions")
     args = parser.parse_args()
     try:
         load_env(args.env_file)
@@ -419,13 +428,21 @@ def main():
         if min(target, args.max_submissions, args.max_candidates, args.max_steps, args.max_runtime) <= 0:
             raise ValueError("limits_must_be_positive")
         dry_run = not (args.submit or args.canary or args.trial or args.reconcile)
+        if dry_run:
+            from audit import run_inventory
+            report = run_inventory(
+                api, state_path, expected_user=expected, target=target, max_steps=args.max_steps,
+                max_candidates=args.max_candidates, max_runtime=args.max_runtime, restart=args.restart_audit)
+            return 0 if report["inventory_complete"] else 3
         solver = configured_model()
         if not dry_run and not args.reconcile:
             audit_path = state_path.parent / "reports/latest-dry-run.json"
             if not audit_path.exists():
                 raise ValueError("read_only_account_audit_required")
             audit = json.loads(audit_path.read_text())
-            if audit.get("account") != expected or not audit.get("inventory_complete"):
+            if (audit.get("account") != expected or not audit.get("inventory_complete")
+                or audit.get("audit_version") != 1 or audit.get("read_errors")
+                or audit.get("stop_reason") != "inventory_exhausted"):
                 raise ValueError("complete_read_only_account_audit_required")
         result = run(api, solver, state_path, target, dry_run,
                      max_submissions=args.max_submissions, max_candidates=args.max_candidates,

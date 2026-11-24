@@ -3,10 +3,10 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 ROOT = Path(__file__).resolve().parent.parent
-FILES = ["README.md", "docs/README.md", "docs/SESSION-2026-11-22.md", "bot.py", "stepik.py", "solver.py", "storage.py", "config.py",
+FILES = ["README.md", "docs/README.md", "docs/SESSION-2026-11-22.md", "bot.py", "audit.py", "stepik.py", "solver.py", "storage.py", "config.py",
          "configure.py", "pi_check.py", "gateway_check.py", "requirements.txt", ".env.example", ".gitignore",
          "stepik-daily-bot.service", "stepik-daily-bot.timer", "scripts/install-systemd.sh", "scripts/package.py",
-         "tests/test_bot.py", "tests/test_integration.py", "tests/test_gateway.py"]
+         "tests/test_bot.py", "tests/test_integration.py", "tests/test_gateway.py", "tests/test_audit.py"]
 
 
 def main():
