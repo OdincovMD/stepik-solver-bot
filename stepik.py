@@ -165,8 +165,11 @@ class Stepik:
     def fetch_many(self, kind, ids):
         result = {}
         ids = list(dict.fromkeys(ids))
-        for start in range(0, len(ids), 20):
-            group = ids[start:start + 20]
+        # Verified against the live API: read-only attempt lookups return all
+        # 100 requested IDs. Other resources and write clients keep small batches.
+        size = 100 if self.read_only and kind == "attempts" else 20
+        for start in range(0, len(ids), size):
+            group = ids[start:start + size]
             for page in range(1, 10001):
                 response = self.request("GET", kind, params=[("ids[]", x) for x in group] + [("page", page)])
                 values = response.get(kind)

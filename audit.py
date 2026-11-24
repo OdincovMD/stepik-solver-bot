@@ -135,25 +135,36 @@ def prepare_history(api, checkpoint, progress, limit):
                 break
     next_page = previous[-1][0] + 1 if previous else 1
     if not checkpoint.get("history_complete", False):
-        for page in range(next_page, 10001):
-            limit()
-            rows, has_next, signature = first if page == 1 and first else history_page(api, page)
-            attempts = api.fetch_many("attempts", [row["attempt"] for row in rows])
+        page = next_page
+        while page <= 10000:
+            batch = []
+            # Establish the first verified page promptly; afterwards combine
+            # five pages into one bounded (up to 100 IDs) owner lookup.
+            for current in range(page, min(page + (1 if page == 1 else 5), 10001)):
+                limit()
+                rows, has_next, signature = first if current == 1 and first else history_page(api, current)
+                batch.append((current, rows, has_next, signature))
+                if not has_next:
+                    break
+            all_rows = [row for _, rows, _, _ in batch for row in rows]
+            attempts = api.fetch_many("attempts", [row["attempt"] for row in all_rows])
             by_id = {a["id"]: a for a in attempts}
             if any(a.get("user") != api.user_id or type(a.get("step")) is not int for a in attempts):
                 raise APIError("audit_history_owner_mismatch")
-            if any(row["attempt"] not in by_id for row in rows):
+            if any(row["attempt"] not in by_id for row in all_rows):
                 raise APIError("audit_history_attempt_missing")
-            with db:
-                for row in rows:
-                    sid = by_id[row["attempt"]]["step"]
-                    db.execute("INSERT OR REPLACE INTO history VALUES (?,?,?,?)", (row["id"], row["attempt"], sid, row["status"]))
-                    if row["status"] == "correct":
-                        db.execute("INSERT OR IGNORE INTO ever_correct VALUES (?)", (sid,))
-                db.execute("INSERT OR REPLACE INTO pages VALUES (?,?,?)", (page, signature, int(has_next)))
-                checkpoint.put("history_complete", not has_next)
-                checkpoint.put("history_checked_at", stamp())
-            progress("history", page=page, resumed_at=next_page, complete=not has_next)
+            for current, rows, has_next, signature in batch:
+                with db:
+                    for row in rows:
+                        sid = by_id[row["attempt"]]["step"]
+                        db.execute("INSERT OR REPLACE INTO history VALUES (?,?,?,?)", (row["id"], row["attempt"], sid, row["status"]))
+                        if row["status"] == "correct":
+                            db.execute("INSERT OR IGNORE INTO ever_correct VALUES (?)", (sid,))
+                    db.execute("INSERT OR REPLACE INTO pages VALUES (?,?,?)", (current, signature, int(has_next)))
+                    checkpoint.put("history_complete", not has_next)
+                    checkpoint.put("history_checked_at", stamp())
+                progress("history", page=current, resumed_at=next_page, complete=not has_next)
+            page = batch[-1][0] + 1
             if not has_next:
                 break
         else:

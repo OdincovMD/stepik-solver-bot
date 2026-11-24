@@ -103,7 +103,7 @@ class AuditTests(unittest.TestCase):
         self.assertTrue(result["inventory_complete"])
         self.assertEqual(result["history_inventory"]["history_resumed_at"], 2)
         self.assertNotIn(("attempts", (11,)), second.calls)
-        self.assertIn(("attempts", (12,)), second.calls)
+        self.assertTrue(any(kind == "attempts" and 12 in ids for kind, ids in second.calls))
         self.assertEqual(result["candidates"], 3)
 
     def test_interrupt_after_section_preserves_sections_and_completed_history(self):
@@ -244,6 +244,36 @@ class AuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "read_only_stepik_client_cannot_write"):
             api.create_attempt(1)
         self.assertTrue(all(method == "GET" for method, _ in transport.calls))
+
+    def test_attempt_batches_use_100_ids_only_for_read_only_clients(self):
+        for read_only, expected_calls in ((False, 5), (True, 1)):
+            api = Stepik("fake", "fake")
+            api.read_only = read_only
+            calls = []
+            def request(method, resource, **kwargs):
+                ids = [v for k, v in kwargs["params"] if k == "ids[]"]
+                calls.append(ids)
+                return {"attempts": [{"id": i} for i in ids], "meta": {"has_next": False}}
+            api.request = request
+            rows = api.fetch_many("attempts", list(range(1, 101)))
+            self.assertEqual(len(rows), 100)
+            self.assertEqual(len(calls), expected_calls)
+
+    def test_attempt_batch_handles_server_pagination_without_omitting_ids(self):
+        api = Stepik("fake", "fake")
+        api.read_only = True
+        calls = []
+        def request(method, resource, **kwargs):
+            params = kwargs["params"]
+            ids = [v for k, v in params if k == "ids[]"]
+            page = dict(params)["page"]
+            part = ids[(page - 1) * 20:page * 20]
+            calls.append(page)
+            return {"attempts": [{"id": i} for i in part], "meta": {"has_next": page * 20 < len(ids)}}
+        api.request = request
+        rows = api.fetch_many("attempts", list(range(1, 101)))
+        self.assertEqual([r["id"] for r in rows], list(range(1, 101)))
+        self.assertEqual(calls, [1, 2, 3, 4, 5])
 
 
 if __name__ == "__main__":
