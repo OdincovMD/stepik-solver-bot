@@ -359,6 +359,14 @@ class ChatModel:
 
 
 def configured_model():
+    provider = os.getenv("LLM_PROVIDER", "local")
+    if provider == "groq":
+        from groq_solver import GroqModel, BASE, MODEL
+        return GroqModel(os.getenv("LLM_MODEL", MODEL), base_url=os.getenv("LLM_BASE_URL", BASE),
+                         key_file=os.getenv("LLM_API_KEY_FILE"), max_tokens=int(os.getenv("LLM_MAX_TOKENS", "2048")),
+                         proxy_url=os.getenv("LLM_PROXY_URL"))
+    if provider != "local":
+        raise ValueError("unsupported_llm_provider")
     return ChatModel(os.getenv("LLM_MODEL", "raspberry-llm"),
                      base_url=os.getenv("LLM_BASE_URL", LOCAL), key_file=os.getenv("LLM_API_KEY_FILE"),
                      max_tokens=int(os.getenv("LLM_MAX_TOKENS", "384")))

@@ -32,7 +32,7 @@ def main():
             f"STEPIK_EXPECTED_USER_ID={expected}\nLLM_MODEL=raspberry-llm\n"
             "LLM_BASE_URL=http://127.0.0.1:18085/v1\n"
             f"LLM_API_KEY_FILE={private / 'llm.key'}\nLLM_MAX_TOKENS=384\n"
-            f"DAILY_TARGET=26\nSTATE_DIR={state}\n")
+            f"DAILY_TARGET=25\nSTATE_DIR={state}\n")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.parent.chmod(0o700)
     # O_EXCL also prevents accidental overwrite in another setup process.

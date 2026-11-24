@@ -92,6 +92,16 @@ class Checkpoint:
         """)
         binding = {"version": VERSION, "account": account, "parameters": parameters}
         old = self.get("binding")
+        # Daily quota does not affect any read/eligibility decision. Migrate a
+        # quota-only edit while retaining verified pages; all audit-policy,
+        # scope, account and read-limit changes still fail closed.
+        if old is not None and old != binding and not restart:
+            comparable_old = dict(old, parameters={k: v for k, v in old.get("parameters", {}).items() if k != "target"})
+            comparable_new = dict(binding, parameters={k: v for k, v in parameters.items() if k != "target"})
+            if comparable_old == comparable_new:
+                with self.db:
+                    self.put("quota_binding_migrations", self.get("quota_binding_migrations", 0) + 1)
+                old = binding
         if old is not None and old != binding and not restart:
             self.db.close()
             raise ValueError("audit_checkpoint_account_or_parameters_mismatch")
@@ -284,7 +294,7 @@ def evaluate(api, checkpoint, step, course, section, state):
     return item
 
 
-def run_inventory(api, state_path, *, expected_user, target=26, max_steps=100000,
+def run_inventory(api, state_path, *, expected_user, target=25, max_steps=100000,
                   max_candidates=100000, max_runtime=39600, restart=False, course_ids=None):
     state_path = Path(state_path)
     scope = audit_scope(course_ids)
@@ -461,7 +471,7 @@ def run_inventory(api, state_path, *, expected_user, target=26, max_steps=100000
             report["read_error_reasons"] = dict(Counter(x["reason"] for x in report["read_errors"]))
             report["candidate_types"] = dict(Counter(x["type"] for x in report["items"] if x["reason"] == "candidate_dataset_not_checked"))
             report["traversal_skips"] = report["expected_exclusions"] + report["read_errors"]
-            report["candidate_days_upper_bound"] = report["candidates"] // 26 if report["inventory_complete"] else None
+            report["candidate_days_upper_bound"] = report["candidates"] // target if report["inventory_complete"] else None
             report["inventory_note"] = "Counts apply only to audit_scope. Potential new candidates, not guaranteed solvable tasks. No fresh attempts or LLM calls."
             report["per_course"] = {}
             for item in report["items"]:

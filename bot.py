@@ -235,8 +235,8 @@ def review_generation_source(state, sid, course_id):
     return history[-1]
 
 
-def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104,
-        max_candidates=104, max_steps=10000, max_runtime=39600, guard_seconds=1200,
+def run(api, solver, state_path, target=25, dry_run=True, *, max_submissions=100,
+        max_candidates=100, max_steps=10000, max_runtime=39600, guard_seconds=1200,
         expected_user=None, canary=False, require_canary=False, model_digest=None, recover_only=False, check_model=False,
         trial=False, require_trial=False, course_ids=None, candidate_step_ids=None, resume_generation=False,
         retry_wrong=False, use_lesson_context=False, resume_review=False):
@@ -505,6 +505,9 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                             break
                         job.update(phase="failed", reason=item["reason"])
                         save_state(state_path, state)
+                    if isinstance(exc, ValueError) and item["reason"].startswith(("groq_http_", "groq_rate_limit_", "groq_transport_", "groq_invalid_response")):
+                        report["stop_reason"] = "model_access_or_rate_limit"
+                        break
                     if isinstance(exc, APIError) and exc.status in {401, 403, 429}:
                         report["stop_reason"] = "api_access_or_rate_limit"
                         break
@@ -535,7 +538,7 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
             report["elapsed_seconds"] = round(time.monotonic() - started, 3)
             report["shortfall"] = max(0, target - report["accepted"])
             report["inventory_complete"] = dry_run and report["stop_reason"] == "inventory_exhausted" and not report["traversal_skips"] and not any(i.get("reason", "").endswith("_unavailable") or "_http_" in i.get("reason", "") for i in report["items"])
-            report["candidate_days_upper_bound"] = report["candidates"] // 26 if report["inventory_complete"] else None
+            report["candidate_days_upper_bound"] = report["candidates"] // target if report["inventory_complete"] else None
             report["inventory_note"] = "Potential new tasks; fresh attempt dataset, model accuracy and eventual verdict remain unverified."
             summary = {}
             for item in report["items"]:
@@ -567,8 +570,8 @@ def main():
     modes.add_argument("--report", action="store_true", help="Print last saved report without network")
     parser.add_argument("--require-canary", action="store_true")
     parser.add_argument("--require-trial", action="store_true")
-    parser.add_argument("--max-submissions", type=int, default=104)
-    parser.add_argument("--max-candidates", type=int, default=104)
+    parser.add_argument("--max-submissions", type=int, default=100)
+    parser.add_argument("--max-candidates", type=int, default=100)
     parser.add_argument("--max-steps", type=int, default=10000)
     parser.add_argument("--max-runtime", type=int, default=39600)
     parser.add_argument("--restart-audit", action="store_true", help="Discard read-only cursors for this account, keeping verified old correct exclusions")
@@ -617,7 +620,7 @@ def main():
                 raise ValueError("unexpected_oauth_account")
             print("OAuth account id:", identity)
             return
-        target = int(os.getenv("DAILY_TARGET", "26"))
+        target = int(os.getenv("DAILY_TARGET", "25"))
         expected = os.getenv("STEPIK_EXPECTED_USER_ID")
         expected = int(expected) if expected else None
         if min(target, args.max_submissions, args.max_candidates, args.max_steps, args.max_runtime) <= 0:
@@ -655,7 +658,7 @@ def main():
                      candidate_step_ids=audited_candidates, resume_generation=args.resume_generation,
                      retry_wrong=args.retry_wrong, use_lesson_context=args.lesson_context, resume_review=args.resume_review)
         last = json.loads((state_path.parent / "reports" / ("latest-dry-run.json" if dry_run else "latest.json")).read_text())
-        if last["stop_reason"] in {"unresolved_submission", "api_access_or_rate_limit"}:
+        if last["stop_reason"] in {"unresolved_submission", "api_access_or_rate_limit", "model_access_or_rate_limit"}:
             return 3
         if args.reconcile:
             return 0

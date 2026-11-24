@@ -6,7 +6,7 @@ from pathlib import Path
 
 ALLOWED = {"STEPIK_CLIENT_ID", "STEPIK_CLIENT_SECRET", "STEPIK_EXPECTED_USER_ID",
            "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY_FILE",
-           "LLM_MAX_TOKENS", "DAILY_TARGET", "STATE_DIR"}
+           "LLM_MAX_TOKENS", "LLM_PROVIDER", "LLM_PROXY_URL", "DAILY_TARGET", "STATE_DIR"}
 
 DEFAULT_ENV = Path.home() / ".config/stepik-daily-bot/stepik.env"
 DEFAULT_STATE = Path.home() / ".local/state/stepik-daily-bot"
