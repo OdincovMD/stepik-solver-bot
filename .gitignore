@@ -18,6 +18,10 @@ access.json
 progress.json
 account-check.json
 model-identity.json
+reviewed-draft*.json
+reviewed-canary-verification.json
+lesson-grounding.json
+canary-*-observation.json
 reports/
 results/
 source.zip

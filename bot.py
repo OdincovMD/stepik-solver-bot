@@ -9,7 +9,7 @@ from pathlib import Path
 
 from config import DEFAULT_ENV, DEFAULT_STATE, load_env
 from solver import SUPPORTED, configured_model, task_reason, validate_reply
-from stepik import APIError, Stepik, is_solved, parse_time
+from stepik import APIError, Stepik, is_solved, parse_time, one
 from storage import load_state, save_state, state_lock
 
 
@@ -137,13 +137,118 @@ def generation_retry_allowed(job, course_id):
             and all(k not in job for k in ("sent_at", "submission_id", "reply")))
 
 
+def wrong_retry_feedback(api, job, course_id, step_id):
+    """An explicit new trial may follow a fully read-back wrong, never an uncertain POST."""
+    if (job.get("phase") != "done" or job.get("reason") != "wrong"
+            or job.get("canary") is not True or job.get("course") != course_id
+            or type(job.get("wrong_retries", 0)) is not int or not 0 <= job.get("wrong_retries", 0) < 3
+            or type(job.get("submission_id")) is not int or not job.get("sent_at")):
+        raise ValueError("wrong_retry_not_safe")
+    attempt = api.existing_attempt(job["attempt_id"], step_id)
+    result = api.verdict(job["submission_id"])
+    if (result.get("id") != job["submission_id"] or result.get("attempt") != job["attempt_id"]
+            or result.get("status") != "wrong" or normalized_reply(result) != job.get("reply")):
+        raise ValueError("wrong_retry_verdict_changed")
+    rows = api.attempt_submissions(job["attempt_id"])
+    expected_ids = set(job.get("baseline", [])) | {job["submission_id"]}
+    if (len(rows) != len(expected_ids) or {r.get("id") for r in rows} != expected_ids
+            or any(r.get("status") != "wrong" or r.get("attempt") != job["attempt_id"] for r in rows)):
+        raise ValueError("wrong_retry_history_changed")
+    reply = validate_reply({"block": {"name": "choice"}}, attempt, job.get("reply"))
+    return {"status": "wrong", "selected_options": [option for option, chosen in
+             zip(attempt["dataset"]["options"], reply["choices"]) if chosen]}
+
+
+def lesson_reference(api, step, options=()):
+    """Read earlier theory in this lesson; return complete ranked sentences, never graded replies."""
+    import re
+    from html import unescape
+    lesson_id = step.get("lesson")
+    if type(lesson_id) is not int or lesson_id <= 0:
+        raise ValueError("lesson_context_identity_missing")
+    lesson = one(api.get(f"lessons/{lesson_id}"), "lessons")
+    ids = lesson.get("steps", [])
+    if lesson.get("id") != lesson_id or step["id"] not in ids:
+        raise ValueError("lesson_context_identity_mismatch")
+    ids = ids[:ids.index(step["id"])]
+    terms = {word[:8] for word in re.findall(r"[^\W\d_]{6,}", step["block"].get("text", "").casefold())}
+    terms -= {"тестиров", "следует", "отнести", "которые", "выберите"}
+    option_terms = {word[:8] for word in re.findall(r"[^\W\d_]{6,}", " ".join(options).casefold())} - {"тестиров"}
+    ranked = []
+    for source in api.fetch_many("steps", ids):
+        if source.get("lesson") != lesson_id:
+            raise ValueError("lesson_context_step_mismatch")
+        if source.get("block", {}).get("name") != "text":
+            continue
+        raw = source["block"].get("text", "")
+        raw = re.sub(r"<(?:br\s*/?|/p|/div|/li|/h[1-6])\s*>", "\n", raw, flags=re.I)
+        text = unescape(re.sub(r"<[^>]+>", "", raw))
+        paragraphs = [x.strip() for x in text.splitlines() if x.strip()]
+        title = paragraphs[0] if paragraphs and len(paragraphs[0]) <= 130 else ""
+        # Keep the antecedent of course statements such as "both types belong
+        # to ...". A detached classification sentence loses which types it covers.
+        relations = [p for p in paragraphs if re.search(r"\b(?:относятся|относится)\b", p, re.I)
+                     and not re.search(r"\bне\s+отно", p, re.I)
+                     and any(term in p.casefold() for term in terms)]
+        for relation in relations:
+            categories = [word for word in re.findall(r"[^\W\d_]+", relation)
+                          if any(word.casefold().startswith(term) for term in terms)]
+            if not categories:
+                continue
+            for paragraph in paragraphs:
+                parts = re.split(r"\s+[–—−-]\s+", paragraph, maxsplit=1)
+                if len(parts) != 2:
+                    continue
+                subject = re.sub(r"\([^)]*\)", "", parts[0]).strip()
+                score = sum(term in subject.casefold() for term in option_terms)
+                if score and len(subject) <= 120:
+                    fact = subject + ": " + ", ".join(categories) + " тестирование."
+                    ranked.append((20 + score, source["id"], fact))
+        for paragraph in paragraphs:
+            for sentence in re.split(r"(?<=[.!?])\s+", paragraph):
+                if not sentence.strip():
+                    continue
+                score = 4 * sum(term in (title + " " + sentence).casefold() for term in terms)
+                score += sum(term in sentence.casefold() for term in option_terms)
+                if score:
+                    note = sentence if not title or title == sentence else title + ": " + sentence
+                    ranked.append((score, source["id"], note))
+    ranked.sort(key=lambda x: (-x[0], len(x[2].encode())))
+    if not ranked:
+        raise ValueError("lesson_context_no_relevant_theory")
+    return [{"source_step": sid, "text": text} for score, sid, text in ranked[:20]]
+
+
+def review_generation_source(state, sid, course_id):
+    job = state["jobs"].get(sid, {})
+    history = state.get("job_history", {}).get(sid, [])
+    if (job.get("phase") != "failed" or job.get("reason") not in {
+            "model_abstained_or_invalid_json", "invalid_choices", "model_repeated_rejected_reply",
+            "model_output_truncated_or_incomplete"}
+            or job.get("canary") is not True or job.get("course") != course_id
+            or not history or history[-1].get("submission_id") != job.get("retry_of")
+            or type(job.get("attempt_id")) is not int or job["attempt_id"] <= 0
+            or type(job.get("review_retries", 0)) is not int or not 0 <= job.get("review_retries", 0) < 2
+            or not isinstance(job.get("baseline"), list)
+            or any(key in job for key in ("sent_at", "submission_id", "reply"))):
+        raise ValueError("review_generation_retry_not_safe")
+    return history[-1]
+
+
 def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104,
         max_candidates=104, max_steps=10000, max_runtime=39600, guard_seconds=1200,
         expected_user=None, canary=False, require_canary=False, model_digest=None, recover_only=False, check_model=False,
-        trial=False, require_trial=False, course_ids=None, candidate_step_ids=None, resume_generation=False):
-    if resume_generation and (dry_run or not canary or not course_ids or len(course_ids) != 1
+        trial=False, require_trial=False, course_ids=None, candidate_step_ids=None, resume_generation=False,
+        retry_wrong=False, use_lesson_context=False, resume_review=False):
+    if (resume_generation or retry_wrong) and (dry_run or not canary or not course_ids or len(course_ids) != 1
                               or candidate_step_ids is None or len(candidate_step_ids) != 1):
         raise ValueError("generation_retry_requires_exact_canary_scope")
+    if resume_generation and retry_wrong:
+        raise ValueError("retry_modes_are_mutually_exclusive")
+    if use_lesson_context and not retry_wrong:
+        raise ValueError("lesson_context_requires_explicit_wrong_retry")
+    if resume_review and not retry_wrong:
+        raise ValueError("review_resume_requires_explicit_wrong_retry")
     if dry_run and isinstance(api, Stepik):
         from audit import run_inventory
         report = run_inventory(api, state_path, expected_user=expected_user if expected_user is not None else api.identity(),
@@ -188,6 +293,23 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                     retry_sid = str(next(iter(candidate_step_ids)))
                     if not generation_retry_allowed(state["jobs"].get(retry_sid, {}), course_ids[0]):
                         raise ValueError("generation_retry_not_safe")
+                if retry_wrong:
+                    retry_sid = str(next(iter(candidate_step_ids)))
+                    retry_previous = state["jobs"].get(retry_sid, {})
+                    if resume_review:
+                        retry_previous = review_generation_source(state, retry_sid, course_ids[0])
+                    retry_feedback = wrong_retry_feedback(api, retry_previous, course_ids[0], int(retry_sid))
+                    rejected = [retry_feedback["selected_options"]]
+                    for previous in state.get("job_history", {}).get(retry_sid, []):
+                        if previous.get("reason") == "wrong":
+                            prior = wrong_retry_feedback(api, previous, course_ids[0], int(retry_sid))
+                            if sorted(prior["selected_options"]) not in [sorted(x) for x in rejected]:
+                                rejected.append(prior["selected_options"])
+                    if len(rejected) > 1:
+                        retry_feedback["rejected_selections"] = rejected
+                    if use_lesson_context:
+                        previous_attempt = api.existing_attempt(retry_previous["attempt_id"], int(retry_sid))
+                        retry_feedback["reference"] = lesson_reference(api, api.step(int(retry_sid)), previous_attempt["dataset"]["options"])
                 marker = state.get("canary", {})
                 if canary and model_digest and marker.get("account") == account and marker.get("model_digest") == model_digest:
                     report["stop_reason"] = "canary_already_verified"
@@ -265,7 +387,7 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                     item["reason"] = "previously_solved_locally"
                     continue
                 retry_job = state["jobs"].get(sid) if resume_generation else None
-                if state["attempted"].get(sid) == day and retry_job is None:
+                if state["attempted"].get(sid) == day and retry_job is None and not retry_wrong:
                     item["reason"] = "attempted_today"
                     continue
                 job = None
@@ -286,7 +408,7 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                         continue
                     # The daily cap includes previous process starts and errors before sending.
                     attempts_today = sum(value == day for value in state["attempted"].values())
-                    if attempts_today >= max_candidates and retry_job is None:
+                    if attempts_today >= max_candidates and retry_job is None and not retry_wrong:
                         report["stop_reason"] = "daily_attempt_limit"
                         item["reason"] = "daily_attempt_limit"
                         break
@@ -301,9 +423,26 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                         if api.attempt_submissions(attempt["id"]):
                             raise ValueError("generation_retry_submission_exists")
                         item["reused_attempt"] = True
+                    elif resume_review:
+                        review_generation_source(state, sid, course["id"])
+                        job = state["jobs"][sid]
+                        job.update(phase="solving", review_retries=job.get("review_retries", 0) + 1, model_digest=model_digest)
+                        save_state(state_path, state)
+                        attempt = api.existing_attempt(job["attempt_id"], step["id"])
+                        rows = api.attempt_submissions(attempt["id"])
+                        if ({r.get("id") for r in rows} != set(job["baseline"])
+                                or len(rows) != len(job["baseline"])
+                                or any(r.get("status") != "wrong" or r.get("attempt") != attempt["id"] for r in rows)):
+                            raise ValueError("review_generation_history_changed")
+                        item["reused_attempt"] = True
                     else:
                         job = {"phase": "creating", "day": day, "course": course["id"],
                                "canary": canary, "trial": trial, "model_digest": model_digest}
+                        if retry_wrong:
+                            import copy
+                            state.setdefault("job_history", {}).setdefault(sid, []).append(copy.deepcopy(retry_previous))
+                            job.update(wrong_retries=retry_previous.get("wrong_retries", 0) + 1,
+                                       retry_of=retry_previous["submission_id"])
                         state["jobs"][sid] = job
                         state["attempted"][sid] = day
                         save_state(state_path, state)
@@ -316,7 +455,10 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                         raise ValueError("attempt_has_pending_submission")
                     job["baseline"] = [x["id"] for x in previous]
                     save_state(state_path, state)
-                    reply = validate_reply(step, attempt, solver.solve(step, attempt))
+                    if retry_wrong:
+                        reply = validate_reply(step, attempt, solver.solve(step, attempt, feedback=retry_feedback))
+                    else:
+                        reply = validate_reply(step, attempt, solver.solve(step, attempt))
                     item["model_metrics"] = getattr(solver, "metrics", {})
                     # The model can take minutes: recheck both the UTC boundary and live progress.
                     if not can_start(day, guard_seconds) or time.monotonic() - started >= max_runtime:
@@ -433,9 +575,14 @@ def main():
     parser.add_argument("--course-id", action="append", type=int, help="Explicit course scope for read-only audit and canary/trial")
     parser.add_argument("--step-id", type=int, help="Select exactly one audited step; canary mode only")
     parser.add_argument("--resume-generation", action="store_true", help="One retry of a never-submitted canary rejected locally as invalid_choices; same attempt only")
+    parser.add_argument("--retry-wrong", action="store_true", help="Explicit single canary POST after a fully verified wrong; same selected task, prior verdict given to LLM")
+    parser.add_argument("--lesson-context", action="store_true", help="Ground an explicit wrong retry in earlier theory of the same lesson")
+    parser.add_argument("--resume-review", action="store_true", help="Bounded generation retry of a reviewed canary that has never sent a POST")
     args = parser.parse_args()
-    if args.resume_generation and not (args.canary and args.step_id and args.course_id and len(args.course_id) == 1):
-        parser.error("--resume-generation requires --canary, one --course-id and --step-id")
+    if (args.resume_generation or args.retry_wrong) and not (args.canary and args.step_id and args.course_id and len(args.course_id) == 1):
+        parser.error("retry requires --canary, one --course-id and --step-id")
+    if args.resume_generation and args.retry_wrong:
+        parser.error("retry modes are mutually exclusive")
     try:
         load_env(args.env_file)
         state_path = Path(os.getenv("STATE_DIR", str(DEFAULT_STATE))) / "progress.json"
@@ -505,7 +652,8 @@ def main():
                      canary=args.canary, require_canary=args.require_canary, trial=args.trial,
                      require_trial=args.submit or args.require_trial,
                      recover_only=args.reconcile, check_model=True, course_ids=args.course_id,
-                     candidate_step_ids=audited_candidates, resume_generation=args.resume_generation)
+                     candidate_step_ids=audited_candidates, resume_generation=args.resume_generation,
+                     retry_wrong=args.retry_wrong, use_lesson_context=args.lesson_context, resume_review=args.resume_review)
         last = json.loads((state_path.parent / "reports" / ("latest-dry-run.json" if dry_run else "latest.json")).read_text())
         if last["stop_reason"] in {"unresolved_submission", "api_access_or_rate_limit"}:
             return 3
