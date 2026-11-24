@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bot import run
-from solver import ChatModel
-from storage import load_state
+from solver import ChatModel, answer_format
+from storage import load_state, save_state
 from test_bot import BotTests, FakeApi, FakeSolver
 from test_integration import Response, offline_solver
 
@@ -81,6 +81,23 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "authenticated_local_gateway"):
             ChatModel(base_url="https://skin-cancer-ai.ru/v1")
 
+    def test_choice_schema_matches_five_live_options_and_preserves_abstention(self):
+        step = {"block": {"name": "choice", "text": "Synthetic question"}}
+        instruction, fmt = answer_format(step, {"dataset": {"options": list("ABCDE"), "is_multiple_choice": False}})
+        self.assertIn("5", instruction)
+        self.assertIn("ровно один", instruction)
+        schemas = fmt["json_schema"]["schema"]["oneOf"]
+        choices = schemas[0]["properties"]["choices"]
+        self.assertEqual((choices["minItems"], choices["maxItems"]), (5, 5))
+        self.assertEqual(choices["items"], {"type": "boolean"})
+        self.assertEqual(schemas[1]["properties"]["skip"], {"const": True})
+
+    def test_invalid_choice_dataset_never_reaches_model(self):
+        transport = Transport([])
+        with self.assertRaisesRegex(ValueError, "missing_attempt_options"):
+            offline_solver(transport, self.temp.name).solve({"block": {"name": "choice"}}, {"dataset": {}})
+        self.assertEqual(transport.calls, 0)
+
 
 class TrialTests(unittest.TestCase):
     setUp = BotTests.setUp
@@ -121,6 +138,68 @@ class TrialTests(unittest.TestCase):
             self.run_bot(api)
         self.assertEqual(api.created, [1])
         self.assertEqual(api.sent, [])
+
+    def test_canary_can_only_send_audited_step_in_selected_course(self):
+        api = FakeApi(["correct", "correct"])
+        self.run_bot(api, canary=True, course_ids=[5], candidate_step_ids={2})
+        self.assertEqual(api.created, [2])
+        self.assertEqual([a for a, _ in api.sent], [20])
+
+    def prepare_rejected_generation(self):
+        api = FakeApi()
+        class InvalidSolver:
+            def solve(self, step, attempt):
+                return {"choices": [True]}
+        self.run_bot(api, solver=InvalidSolver(), canary=True, max_candidates=1,
+                     course_ids=[5], candidate_step_ids={1})
+        self.assertEqual(api.created, [1])
+        self.assertEqual(api.sent, [])
+        self.assertEqual(load_state(self.path)["jobs"]["1"]["reason"], "invalid_choices")
+        def existing(aid, sid):
+            self.assertEqual((aid, sid), (10, 1))
+            return {"id": aid, "dataset": {"options": ["A", "B"], "is_multiple_choice": False}}
+        api.existing_attempt = existing
+        return api
+
+    def test_explicit_generation_retry_reuses_attempt_and_sends_only_once(self):
+        api = self.prepare_rejected_generation()
+        result = self.run_bot(api, canary=True, max_candidates=1, course_ids=[5],
+                              candidate_step_ids={1}, resume_generation=True)
+        self.assertEqual(result, 1)
+        self.assertEqual(api.created, [1])
+        self.assertEqual(len(api.sent), 1)
+        self.assertEqual(load_state(self.path)["jobs"]["1"]["generation_retries"], 1)
+        with self.assertRaisesRegex(ValueError, "generation_retry_not_safe"):
+            self.run_bot(api, canary=True, course_ids=[5], candidate_step_ids={1}, resume_generation=True)
+        self.assertEqual(len(api.sent), 1)
+
+    def test_retry_rejects_any_possible_post_and_is_bounded(self):
+        api = self.prepare_rejected_generation()
+        base = load_state(self.path)
+        import copy
+        changes = [{"sent_at": "unknown"}, {"submission_id": 11}, {"reply": {}},
+                   {"generation_retries": 1}, {"baseline": [11]}, {"reason": "wrong"},
+                   {"attempt_id": None}, {"course": 99}]
+        for change in changes:
+            state = copy.deepcopy(base)
+            state["jobs"]["1"].update(change)
+            save_state(self.path, state)
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "generation_retry_not_safe"):
+                self.run_bot(api, canary=True, course_ids=[5], candidate_step_ids={1}, resume_generation=True)
+        self.assertEqual(api.sent, [])
+        self.assertEqual(api.created, [1])
+
+    def test_retry_aborts_when_server_already_has_submission(self):
+        api = self.prepare_rejected_generation()
+        api.attempt_submissions = lambda aid: [{"id": 11}]
+        self.run_bot(api, canary=True, course_ids=[5], candidate_step_ids={1}, resume_generation=True)
+        self.assertEqual(api.sent, [])
+        self.assertEqual(self.report()["reasons"], {"generation_retry_submission_exists": 1})
+
+    def test_retry_requires_one_explicit_course_and_step(self):
+        for kwargs in ({}, {"canary": True}, {"canary": True, "course_ids": [5], "candidate_step_ids": {1, 2}}):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, "exact_canary_scope"):
+                self.run_bot(FakeApi(), resume_generation=True, **kwargs)
 
     def test_interrupted_inventory_is_never_marked_complete(self):
         api = FakeApi()

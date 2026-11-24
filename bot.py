@@ -127,14 +127,28 @@ def recover(api, state, path, report):
     return True
 
 
+def generation_retry_allowed(job, course_id):
+    # Only one explicit retry after a local format rejection. A possible POST,
+    # verdict, pre-existing submission or prior retry can never pass this gate.
+    return (job.get("phase") == "failed" and job.get("reason") == "invalid_choices"
+            and job.get("canary") is True and job.get("course") == course_id
+            and type(job.get("attempt_id")) is int and job["attempt_id"] > 0
+            and job.get("baseline") == [] and job.get("generation_retries", 0) == 0
+            and all(k not in job for k in ("sent_at", "submission_id", "reply")))
+
+
 def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104,
         max_candidates=104, max_steps=10000, max_runtime=39600, guard_seconds=1200,
         expected_user=None, canary=False, require_canary=False, model_digest=None, recover_only=False, check_model=False,
-        trial=False, require_trial=False):
+        trial=False, require_trial=False, course_ids=None, candidate_step_ids=None, resume_generation=False):
+    if resume_generation and (dry_run or not canary or not course_ids or len(course_ids) != 1
+                              or candidate_step_ids is None or len(candidate_step_ids) != 1):
+        raise ValueError("generation_retry_requires_exact_canary_scope")
     if dry_run and isinstance(api, Stepik):
         from audit import run_inventory
         report = run_inventory(api, state_path, expected_user=expected_user if expected_user is not None else api.identity(),
-                               target=target, max_steps=max_steps, max_candidates=max_candidates, max_runtime=max_runtime)
+                               target=target, max_steps=max_steps, max_candidates=max_candidates, max_runtime=max_runtime,
+                               course_ids=course_ids)
         return report["accepted"]
     state_path = Path(state_path)
     report = {"started_at": utcnow().isoformat(), "utc_day": utcnow().date().isoformat(),
@@ -170,6 +184,10 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                 if check_model:
                     report["model"] = solver.preflight()
                     model_digest = report["model"].get("digest")
+                if resume_generation:
+                    retry_sid = str(next(iter(candidate_step_ids)))
+                    if not generation_retry_allowed(state["jobs"].get(retry_sid, {}), course_ids[0]):
+                        raise ValueError("generation_retry_not_safe")
                 marker = state.get("canary", {})
                 if canary and model_digest and marker.get("account") == account and marker.get("model_digest") == model_digest:
                     report["stop_reason"] = "canary_already_verified"
@@ -187,6 +205,13 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                 report["stop_reason"] = "target_reached"
                 return count_today(state, day)
             courses = api.courses()
+            report["total_account_courses"] = len(courses)
+            if course_ids:
+                selected = set(course_ids)
+                if not selected <= {c["id"] for c in courses}:
+                    raise ValueError("selected_course_not_enrolled")
+                courses = [c for c in courses if c["id"] in selected]
+            report["audit_scope"] = {"kind": "courses" if course_ids else "all", "course_ids": sorted(set(course_ids or []))}
             report["courses"] = len(courses)
             report["course_list"] = [{"id": c["id"], "title": c.get("title", "")} for c in courses]
             report["legacy_unverified"] = len(state.get("legacy_solved", {}))
@@ -222,6 +247,9 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                 sid = str(step["id"])
                 item = {"step": step["id"], "course": course["id"], "type": step.get("block", {}).get("name")}
                 report["items"].append(item)
+                if candidate_step_ids is not None and step["id"] not in candidate_step_ids:
+                    item["reason"] = "not_in_completed_audit"
+                    continue
                 # Include solved steps: their history can establish real accepted
                 # verdict/reply shapes before any fresh attempt is created.
                 sampled = report.get("api_samples", [])
@@ -236,7 +264,8 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                 if sid in state["solved"] or sid in state.get("legacy_solved", {}):
                     item["reason"] = "previously_solved_locally"
                     continue
-                if state["attempted"].get(sid) == day:
+                retry_job = state["jobs"].get(sid) if resume_generation else None
+                if state["attempted"].get(sid) == day and retry_job is None:
                     item["reason"] = "attempted_today"
                     continue
                 job = None
@@ -257,16 +286,28 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                         continue
                     # The daily cap includes previous process starts and errors before sending.
                     attempts_today = sum(value == day for value in state["attempted"].values())
-                    if attempts_today >= max_candidates:
+                    if attempts_today >= max_candidates and retry_job is None:
                         report["stop_reason"] = "daily_attempt_limit"
                         item["reason"] = "daily_attempt_limit"
                         break
-                    job = {"phase": "creating", "day": day, "course": course["id"],
-                           "canary": canary, "trial": trial, "model_digest": model_digest}
-                    state["jobs"][sid] = job
-                    state["attempted"][sid] = day
-                    save_state(state_path, state)
-                    attempt = api.create_attempt(step["id"])
+                    if retry_job is not None:
+                        if not generation_retry_allowed(retry_job, course["id"]):
+                            raise ValueError("generation_retry_not_safe")
+                        job = retry_job
+                        # Reserve before GET/generation: a crash consumes the retry.
+                        job.update(phase="solving", generation_retries=1, model_digest=model_digest)
+                        save_state(state_path, state)
+                        attempt = api.existing_attempt(job["attempt_id"], step["id"])
+                        if api.attempt_submissions(attempt["id"]):
+                            raise ValueError("generation_retry_submission_exists")
+                        item["reused_attempt"] = True
+                    else:
+                        job = {"phase": "creating", "day": day, "course": course["id"],
+                               "canary": canary, "trial": trial, "model_digest": model_digest}
+                        state["jobs"][sid] = job
+                        state["attempted"][sid] = day
+                        save_state(state_path, state)
+                        attempt = api.create_attempt(step["id"])
                     job.update(phase="solving", attempt_id=attempt["id"])
                     save_state(state_path, state)
                     # Stepik may reuse an active attempt; retain existing submission IDs.
@@ -305,6 +346,8 @@ def run(api, solver, state_path, target=26, dry_run=True, *, max_submissions=104
                     item["reason"] = job["reason"]
                     save_state(state_path, state)
                 except (APIError, ValueError, KeyError, TypeError, TimeoutError) as exc:
+                    if job is not None and job.get("phase") == "solving":
+                        item["model_metrics"] = getattr(solver, "metrics", {})
                     item["reason"] = safe_error(exc)
                     if job is not None:
                         if job["phase"] == "sending":
@@ -387,7 +430,12 @@ def main():
     parser.add_argument("--max-steps", type=int, default=10000)
     parser.add_argument("--max-runtime", type=int, default=39600)
     parser.add_argument("--restart-audit", action="store_true", help="Discard read-only cursors for this account, keeping verified old correct exclusions")
+    parser.add_argument("--course-id", action="append", type=int, help="Explicit course scope for read-only audit and canary/trial")
+    parser.add_argument("--step-id", type=int, help="Select exactly one audited step; canary mode only")
+    parser.add_argument("--resume-generation", action="store_true", help="One retry of a never-submitted canary rejected locally as invalid_choices; same attempt only")
     args = parser.parse_args()
+    if args.resume_generation and not (args.canary and args.step_id and args.course_id and len(args.course_id) == 1):
+        parser.error("--resume-generation requires --canary, one --course-id and --step-id")
     try:
         load_env(args.env_file)
         state_path = Path(os.getenv("STATE_DIR", str(DEFAULT_STATE))) / "progress.json"
@@ -428,28 +476,36 @@ def main():
         if min(target, args.max_submissions, args.max_candidates, args.max_steps, args.max_runtime) <= 0:
             raise ValueError("limits_must_be_positive")
         dry_run = not (args.submit or args.canary or args.trial or args.reconcile)
+        if args.course_id and not (dry_run or args.canary or args.trial):
+            raise ValueError("course_scope_only_for_audit_and_trials")
+        if args.step_id is not None and (not args.canary or args.step_id <= 0):
+            raise ValueError("step_selection_only_for_canary")
         if dry_run:
             from audit import run_inventory
             report = run_inventory(
                 api, state_path, expected_user=expected, target=target, max_steps=args.max_steps,
-                max_candidates=args.max_candidates, max_runtime=args.max_runtime, restart=args.restart_audit)
+                max_candidates=args.max_candidates, max_runtime=args.max_runtime, restart=args.restart_audit,
+                course_ids=args.course_id)
             return 0 if report["inventory_complete"] else 3
         solver = configured_model()
+        audited_candidates = None
         if not dry_run and not args.reconcile:
             audit_path = state_path.parent / "reports/latest-dry-run.json"
             if not audit_path.exists():
                 raise ValueError("read_only_account_audit_required")
             audit = json.loads(audit_path.read_text())
-            if (audit.get("account") != expected or not audit.get("inventory_complete")
-                or audit.get("audit_version") != 1 or audit.get("read_errors")
-                or audit.get("stop_reason") != "inventory_exhausted"):
-                raise ValueError("complete_read_only_account_audit_required")
+            from audit import validate_inventory
+            validate_inventory(audit, expected, args.course_id, now=utcnow(), step_id=args.step_id)
+            audited_candidates = {x["step"] for x in audit.get("items", []) if x.get("reason") == "candidate_dataset_not_checked"}
+            if args.step_id is not None:
+                audited_candidates = {args.step_id}
         result = run(api, solver, state_path, target, dry_run,
                      max_submissions=args.max_submissions, max_candidates=args.max_candidates,
                      max_steps=args.max_steps, max_runtime=args.max_runtime, expected_user=expected,
                      canary=args.canary, require_canary=args.require_canary, trial=args.trial,
                      require_trial=args.submit or args.require_trial,
-                     recover_only=args.reconcile, check_model=True)
+                     recover_only=args.reconcile, check_model=True, course_ids=args.course_id,
+                     candidate_step_ids=audited_candidates, resume_generation=args.resume_generation)
         last = json.loads((state_path.parent / "reports" / ("latest-dry-run.json" if dry_run else "latest.json")).read_text())
         if last["stop_reason"] in {"unresolved_submission", "api_access_or_rate_limit"}:
             return 3

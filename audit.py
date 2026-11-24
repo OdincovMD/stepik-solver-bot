@@ -33,6 +33,35 @@ def error_code(exc):
     return value if isinstance(exc, (APIError, ValueError, RuntimeError)) and re.fullmatch(r"[a-z_0-9]+", value) else type(exc).__name__
 
 
+def audit_scope(course_ids=None):
+    ids = sorted(set(course_ids or []))
+    if any(type(cid) is not int or cid <= 0 for cid in ids):
+        raise ValueError("invalid_audit_course_ids")
+    return {"kind": "courses" if ids else "all", "course_ids": ids}
+
+
+def validate_inventory(report, account, course_ids=None, now=None, step_id=None):
+    if (report.get("account") != account or not report.get("inventory_complete")
+        or report.get("audit_version") != VERSION or report.get("read_errors")
+        or report.get("stop_reason") != "inventory_exhausted"):
+        raise ValueError("complete_read_only_account_audit_required")
+    requested = audit_scope(course_ids)
+    covered = report.get("audit_scope", {"kind": "all", "course_ids": []})
+    if requested["kind"] == "courses" and not set(requested["course_ids"]) <= {c["id"] for c in report.get("course_list", [])}:
+        raise ValueError("requested_course_not_in_completed_audit")
+    if covered["kind"] == "courses" and requested != covered:
+        raise ValueError("completed_audit_does_not_cover_requested_courses")
+    if covered["kind"] not in {"all", "courses"}:
+        raise ValueError("unknown_audit_scope")
+    if requested["kind"] == "all" and not report.get("account_inventory_complete", covered["kind"] == "all"):
+        raise ValueError("complete_account_audit_required_for_unscoped_writes")
+    age = ((now or datetime.now(timezone.utc)) - parse_time(report.get("finished_at"))).total_seconds()
+    if not 0 <= age <= 86400:
+        raise ValueError("recent_read_only_account_audit_required")
+    if step_id is not None and not any(x.get("step") == step_id and x.get("reason") == "candidate_dataset_not_checked" for x in report.get("items", [])):
+        raise ValueError("selected_step_not_in_completed_audit")
+
+
 class AuditStop(RuntimeError):
     pass
 
@@ -256,18 +285,20 @@ def evaluate(api, checkpoint, step, course, section, state):
 
 
 def run_inventory(api, state_path, *, expected_user, target=26, max_steps=100000,
-                  max_candidates=100000, max_runtime=39600, restart=False):
+                  max_candidates=100000, max_runtime=39600, restart=False, course_ids=None):
     state_path = Path(state_path)
+    scope = audit_scope(course_ids)
     started = time.monotonic()
     report = {"audit_version": VERSION, "mode": "dry_run", "started_at": stamp(), "utc_day": stamp()[:10],
               "target": target, "accepted": 0, "submissions_sent": 0, "scanned": 0, "candidates": 0,
               "items": [], "expected_exclusions": [], "read_errors": [], "handled_api_errors": [],
-              "inventory_complete": False, "stop_reason": "inventory_exhausted", "resumed_sections": 0, "api_samples": []}
+              "inventory_complete": False, "account_inventory_complete": False, "audit_scope": scope,
+              "stop_reason": "inventory_exhausted", "resumed_sections": 0, "api_samples": []}
     cp = None
     last_progress = [0.0]
 
     def progress(stage, **fields):
-        data = dict(stage=stage, at=stamp(), scanned=report["scanned"], candidates=report["candidates"], submissions_sent=0, **fields)
+        data = dict(stage=stage, at=stamp(), scanned=report["scanned"], candidates=report["candidates"], submissions_sent=0, audit_scope=scope, **fields)
         save_state(state_path.parent / "reports/inventory-progress.json", data)
         now = time.monotonic()
         if now - last_progress[0] >= 15 or fields.get("complete") or stage == "history_invalidated":
@@ -294,6 +325,9 @@ def run_inventory(api, state_path, *, expected_user, target=26, max_steps=100000
 
     seen_steps = set()
     with state_lock(state_path.parent):
+        # Publish an incomplete marker before any remote reads. SIGKILL/reboot
+        # must not leave an older successful report authorizing a new write.
+        save_state(state_path.parent / "reports/latest-dry-run.json", dict(report, stop_reason="audit_in_progress"))
         try:
             api.read_only = True
             account = api.identity()
@@ -306,10 +340,25 @@ def run_inventory(api, state_path, *, expected_user, target=26, max_steps=100000
             report["accepted"] = sum(x.get("date") == report["utc_day"] and x.get("verified") is True for x in state["solved"].values())
             parameters = {"max_steps": max_steps, "max_candidates": max_candidates, "target": target,
                           "eligibility_policy": "strict-new-v1", "history_filter": "correct_plus_legacy"}
-            cp = Checkpoint(state_path.parent / "audit.sqlite3", account, parameters, restart=restart)
+            filename = "audit.sqlite3"
+            if scope["kind"] == "courses":
+                parameters.update(course_ids=scope["course_ids"], history_filter="per_step_fresh")
+                filename = "audit-courses-" + digest(scope["course_ids"])[:12] + ".sqlite3"
+            cp = Checkpoint(state_path.parent / filename, account, parameters, restart=restart)
             report["checkpoint_binding"] = digest(cp.get("binding"))
-            report["history_inventory"] = prepare_history(api, cp, progress, limit)
+            if scope["kind"] == "all":
+                report["history_inventory"] = prepare_history(api, cp, progress, limit)
+            else:
+                # For an explicitly selected course, verify every eligible step's
+                # own full history instead of replaying the unrelated account archive.
+                report["history_inventory"] = {"mode": "per_step_fresh", "global_history_replayed": False}
             courses = api.courses()
+            report["total_account_courses"] = len(courses)
+            if scope["kind"] == "courses":
+                selected = set(scope["course_ids"])
+                if not selected <= {c["id"] for c in courses}:
+                    raise ValueError("selected_course_not_enrolled")
+                courses = [c for c in courses if c["id"] in selected]
             report["courses"] = len(courses)
             report["course_list"] = [{"id": c["id"], "title": c.get("title", "")} for c in courses]
             for index, course in enumerate(courses, 1):
@@ -391,6 +440,7 @@ def run_inventory(api, state_path, *, expected_user, target=26, max_steps=100000
                 report["stop_reason"] = "unresolved_read_errors"
             else:
                 report["inventory_complete"] = True
+                report["account_inventory_complete"] = scope["kind"] == "all"
         except KeyboardInterrupt:
             report["stop_reason"] = "interrupted"
             raise
@@ -412,7 +462,7 @@ def run_inventory(api, state_path, *, expected_user, target=26, max_steps=100000
             report["candidate_types"] = dict(Counter(x["type"] for x in report["items"] if x["reason"] == "candidate_dataset_not_checked"))
             report["traversal_skips"] = report["expected_exclusions"] + report["read_errors"]
             report["candidate_days_upper_bound"] = report["candidates"] // 26 if report["inventory_complete"] else None
-            report["inventory_note"] = "Potential new candidates, not guaranteed solvable tasks. No fresh attempts or LLM calls in this audit."
+            report["inventory_note"] = "Counts apply only to audit_scope. Potential new candidates, not guaranteed solvable tasks. No fresh attempts or LLM calls."
             report["per_course"] = {}
             for item in report["items"]:
                 group = report["per_course"].setdefault(str(item["course"]), {"types": {}, "reasons": {}, "candidates": 0})
@@ -423,5 +473,5 @@ def run_inventory(api, state_path, *, expected_user, target=26, max_steps=100000
             folder = state_path.parent / "reports"
             save_state(folder / (report["started_at"].replace(":", "-") + ".json"), report)
             save_state(folder / "latest-dry-run.json", report)
-            print(json.dumps({k: report[k] for k in ("mode", "scanned", "candidates", "candidate_types", "inventory_complete", "submissions_sent", "stop_reason")}), flush=True)
+            print(json.dumps({k: report[k] for k in ("mode", "audit_scope", "scanned", "candidates", "candidate_types", "inventory_complete", "account_inventory_complete", "submissions_sent", "stop_reason")}), flush=True)
     return report

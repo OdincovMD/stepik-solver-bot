@@ -2,12 +2,14 @@
 import copy
 import io
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from audit import run_inventory
+from audit import run_inventory, validate_inventory
 from stepik import APIError, Stepik
 from test_integration import StepikTransport
 
@@ -118,6 +120,24 @@ class AuditTests(unittest.TestCase):
         self.assertFalse(any(kind == "attempts" and ids for kind, ids in second.calls))
         pages = [p["page"] for kind, p in second.calls if kind == "submissions"]
         self.assertNotIn(2, pages)  # Only first/last anchors, not the interior archive.
+
+    def test_abrupt_process_exit_cannot_leave_an_old_complete_report(self):
+        self.assertTrue(self.run_audit(AuditAPI())["inventory_complete"])
+        root = Path(__file__).resolve().parent.parent
+        code = """import os,sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from audit import run_inventory
+from test_audit import AuditAPI
+api=AuditAPI()
+api.identity=lambda: os._exit(9)
+run_inventory(api, Path(sys.argv[1]), expected_user=42)
+"""
+        exited = subprocess.run([sys.executable, "-c", code, str(self.path)], cwd=root, capture_output=True)
+        self.assertEqual(exited.returncode, 9)
+        self.assertFalse(self.report()["inventory_complete"])
+        self.assertEqual(self.report()["stop_reason"], "audit_in_progress")
+        self.assertTrue(self.run_audit(AuditAPI())["inventory_complete"])
 
     def test_head_change_invalidates_old_pagination(self):
         first = AuditAPI()
@@ -274,6 +294,42 @@ class AuditTests(unittest.TestCase):
         rows = api.fetch_many("attempts", list(range(1, 101)))
         self.assertEqual([r["id"] for r in rows], list(range(1, 101)))
         self.assertEqual(calls, [1, 2, 3, 4, 5])
+
+    def test_course_scope_is_complete_only_for_explicit_course_and_preserves_global_cursor(self):
+        global_api = AuditAPI()
+        global_api.interrupt_history = 12
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_audit(global_api)
+        scoped = AuditAPI()
+        result = self.run_audit(scoped, course_ids=[5])
+        self.assertTrue(result["inventory_complete"])
+        self.assertFalse(result["account_inventory_complete"])
+        self.assertEqual(result["audit_scope"], {"kind": "courses", "course_ids": [5]})
+        self.assertFalse(any(resource == "submissions" for resource, _ in scoped.calls))
+        self.assertEqual(result["history_inventory"]["mode"], "per_step_fresh")
+        validate_inventory(result, 42, [5])
+        validate_inventory(result, 42, [5], step_id=1)
+        with self.assertRaisesRegex(ValueError, "selected_step_not_in_completed_audit"):
+            validate_inventory(result, 42, [5], step_id=90)
+        with self.assertRaises(ValueError):
+            validate_inventory(result, 42)
+        with self.assertRaises(ValueError):
+            validate_inventory(result, 42, [6])
+        resumed = AuditAPI()
+        global_report = self.run_audit(resumed)
+        self.assertEqual(global_report["history_inventory"]["history_resumed_at"], 2)
+        self.assertNotIn(("attempts", (11,)), resumed.calls)
+
+    def test_selected_course_must_still_be_enrolled(self):
+        with self.assertRaisesRegex(ValueError, "selected_course_not_enrolled"):
+            self.run_audit(AuditAPI(), course_ids=[99])
+        self.assertFalse(self.report()["inventory_complete"])
+
+    def test_full_inventory_can_cover_a_selected_course(self):
+        result = self.run_audit(AuditAPI())
+        self.assertTrue(result["account_inventory_complete"])
+        validate_inventory(result, 42, [5])
+        validate_inventory(result, 42)
 
 
 if __name__ == "__main__":

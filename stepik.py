@@ -275,6 +275,14 @@ class Stepik:
             raise APIError("attempt_id")
         return attempt
 
+    def existing_attempt(self, attempt_id, step_id):
+        """GET only: reuse a never-submitted attempt after an explicit generation retry."""
+        attempt = one(self.get(f"attempts/{attempt_id}"), "attempts")
+        if (attempt.get("id") != attempt_id or attempt.get("step") != step_id
+                or self.user_id is None or attempt.get("user") != self.user_id):
+            raise APIError("attempt_identity")
+        return attempt
+
     def submit(self, attempt_id, reply):
         data = self.request("POST", "submissions", json={"submission": {"attempt": attempt_id, "reply": reply}})
         return one(data, "submissions")["id"]

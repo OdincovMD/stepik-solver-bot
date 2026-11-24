@@ -128,7 +128,8 @@ class ChatTransport:
         assert url == "http://127.0.0.1:18085/v1/chat/completions"
         assert kwargs["headers"]["Authorization"].startswith("Bearer llm_")
         data = kwargs["json"]
-        assert data["stream"] is True and data["response_format"] == {"type": "json_object"}
+        assert data["stream"] is True
+        assert data["response_format"]["type"] in {"json_object", "json_schema"}
         assert data["max_tokens"] == 384 and data["model"] == "raspberry-llm"
         block = json.loads(data["messages"][1]["content"])["block"]
         self.generations += 1
@@ -143,6 +144,25 @@ def offline_solver(transport, folder):
 
 
 class WireTests(unittest.TestCase):
+    def test_existing_attempt_is_get_only_and_checks_identity(self):
+        class ChangedAttempt(StepikTransport):
+            change = {}
+            def request(self, method, url, **kwargs):
+                response = super().request(method, url, **kwargs)
+                if "/api/attempts/" in url:
+                    response.data["attempts"][0].update(self.change)
+                return response
+        from stepik import APIError
+        remote = ChangedAttempt()
+        api = Stepik("id", "secret", session=remote)
+        api.identity()
+        self.assertEqual(api.existing_attempt(10, 1)["id"], 10)
+        for change in ({"user": 99}, {"step": 2}, {"id": 20}):
+            remote.change = change
+            with self.subTest(change=change), self.assertRaisesRegex(APIError, "attempt_identity"):
+                api.existing_attempt(10, 1)
+        self.assertTrue(all(method == "GET" for method, path in remote.calls))
+
     def test_correct_verdict_with_wrong_attempt_owner_is_not_counted_or_compensated(self):
         class ChangedOwner(StepikTransport):
             def request(self, method, url, **kwargs):
